@@ -19,23 +19,48 @@ runtest: &runtest
 version: 2.1
 
 jobs:
+  verify-dependencies:
+    docker:
+      - image: circleci/python:3.6-buster
+
+    steps:
+      - checkout
+      - run:
+          name: Check installed dependencies are compatible
+          command: |
+            pip install --progress-bar=off -e .
+            pip check -vvv
+
+  type-check:
+    docker:
+      - image: circleci/python:3.6-buster
+
+    steps:
+      - checkout
+      - run:
+          name: Install type checker
+          command: pip install mypy
+      - run:
+          name: Run type checker
+          command: mypy .
+
   unit-test:
     <<: *runtest
     docker:
-      - image: awav/tensorflow:2.1
+      - image: circleci/python:3.6-buster
         environment:
           PYTEST_FILTER: not notebooks
 
   notebook-test:
     <<: *runtest
     docker:
-      - image: awav/tensorflow:2.1
+      - image: circleci/python:3.6-buster
         environment:
           PYTEST_FILTER: notebooks
 
   format-checker:
     docker:
-      - image: awav/tensorflow:2.1
+      - image: circleci/python:3.6-buster
 
     steps:
       - checkout
@@ -50,7 +75,7 @@ jobs:
 
   trigger-docs-generation:
     docker:
-      - image: awav/tensorflow:2.1
+      - image: circleci/python:3.6-buster
         environment:
             ORGANIZATION: GPflow
             PROJECT: docs
@@ -68,7 +93,7 @@ jobs:
 
   deploy:
     docker:
-      - image: awav/tensorflow:2.1
+      - image: circleci/python:3.6-buster
     steps:
       - checkout
       - run:
@@ -103,6 +128,14 @@ workflows:
   version: 2.1
   build_test_and_deploy:
     jobs:
+      - verify-dependencies:
+          filters:
+            tags:
+              only: /^v[0-9]+(\.[0-9]+)*(-rc[0-9]+)?/
+      - type-check:
+          filters:
+            tags:
+              only: /^v[0-9]+(\.[0-9]+)*(-rc[0-9]+)?/
       - format-checker:
           filters:
             tags:

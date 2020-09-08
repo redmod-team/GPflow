@@ -1,7 +1,7 @@
 import copy
 import re
 from functools import lru_cache
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, Iterable
 
 import numpy as np
 import tensorflow as tf
@@ -25,8 +25,6 @@ __all__ = [
     "read_values",
     "to_default_float",
     "to_default_int",
-    "getattr_by_path",
-    "setattr_by_path",
     "reset_cache_bijectors",
     "select_dict_parameters_with_prior",
 ]
@@ -46,12 +44,16 @@ def to_default_float(x):
     return cast(x, dtype=default_float())
 
 
-def set_trainable(model: tf.Module, flag: bool):
+def set_trainable(model: Union[tf.Module, Iterable[tf.Module]], flag: bool) -> None:
     """
-    Set trainable flag for all `tf.Variable`s and `gpflow.Parameter`s in a module.
+    Set trainable flag for all `tf.Variable`s and `gpflow.Parameter`s in a `tf.Module` or collection
+    of `tf.Module`s.
     """
-    for variable in model.variables:
-        variable._trainable = flag
+    modules = [model] if isinstance(model, tf.Module) else model
+
+    for mod in modules:
+        for variable in mod.variables:
+            variable._trainable = flag
 
 
 def multiple_assign(module: tf.Module, parameters: Dict[str, tf.Tensor]):
@@ -188,17 +190,22 @@ def leaf_components(input: tf.Module):
 def _merge_leaf_components(
     input: Dict[str, Union[tf.Variable, tf.Tensor, Parameter]]
 ) -> Dict[str, Union[tf.Variable, tf.Tensor, Parameter]]:
-    input_values = set([value.experimental_ref() for value in input.values()])
+
+    ref_fn = lambda x: (x if isinstance(x, Parameter) else x.ref())
+    deref_fn = lambda x: (x if isinstance(x, Parameter) else x.deref())
+
+    input_values = set([ref_fn(value) for value in input.values()])
     if len(input_values) == len(input):
         return input
+
     tmp_dict = dict()  # Type: Dict[ref, str]
-    for key, variable in input.items():
-        ref = variable.experimental_ref()
+    for key, value in input.items():
+        ref = ref_fn(value)
         if ref in tmp_dict:
             tmp_dict[ref] = f"{tmp_dict[ref]}\n{key}"
         else:
             tmp_dict[ref] = key
-    return {key: ref.deref() for ref, key in tmp_dict.items()}
+    return {key: deref_fn(ref) for ref, key in tmp_dict.items()}
 
 
 def _get_leaf_components(input_module: tf.Module):
@@ -252,127 +259,19 @@ def reset_cache_bijectors(input_module: tf.Module) -> tf.Module:
     return input_module
 
 
-def _get_by_name_index(parent: object, attr_str: str, index_str: Union[str, None]) -> object:
-    attr = getattr(parent, attr_str)
-    if index_str is not None:
-        index = int(index_str)
-        return attr[index]
-    return attr
-
-
-def _set_by_name_index(parent: object, value: Any, attr_str: str, index_str: Union[str, None]):
-    if index_str is not None:
-        index = int(index_str)
-        attr = getattr(parent, attr_str)
-        attr[index] = value
-        # NOTE: tensorflow's __setattr__ override does not contain a check for the case where
-        # an attribute holding a trackable object (e.g. a Variable) is being reassigned
-        # a non-trackable object (e.g. a constant). Therefore, tensorflow still stores
-        # internal references to the trackable object after reassignment, which can lead
-        # to various problems, for example https://github.com/GPflow/GPflow/pull/1338
-        # By calling delattr first, we are forcing tensorflow to remove its internal reference.
-        # This is a tensorflow bug, see https://github.com/tensorflow/tensorflow/issues/37806
-        delattr(parent, attr_str)
-        setattr(parent, attr_str, attr)
-    else:
-        delattr(parent, attr_str)  # as above
-        setattr(parent, attr_str, value)
-
-
-def _get_last_attr_spec(parent: object, attr_path: str) -> Tuple[object, str, str]:
-    """
-    Returns second to last attribute, the next attribute name, and
-    an index if there is a list access.
-
-    Example:
-        module = ModuleWithNestedStructure(...)
-        attr_path = "a.b.c[0].d[1000]"
-        value = module.a.b.c[0].d[1000]
-        c0, dname, dindex = _get_last_attr_spec(module, "a.b.c[0].d[1000]")
-        assert c0 is module.a.b.c[0]
-        assert dname == "d"
-        assert dindex == "1000"
-
-    :param parent: A python object with a nested structure.
-    :param attr_path: An attribute path.
-
-    :returns: The value stored in the nested object by the attribute path,
-        and last attribute name with an optional index.
-    """
-
-    # Regexp extracts attribute name and index if available.
-    # - '(\w+)' is a group for attribute name.
-    # - '(\[\s*(-?\d+)\s*\])?' is the index group and has a subgroup '(-?\d+)',
-    #   that matches a number. This group may not appear in the search string.
-    regexp = re.compile(r"^(\w+)(\[\s*(-?\d+)\s*\])?$")
-
-    def parse(token: str) -> Tuple[str, str]:
-        m = regexp.match(token)
-        if m is None:
-            raise ValueError(f"Cannot parse attribute path '{attr_path}'")
-        attr_token, _, index_token = m.groups()
-        return attr_token, index_token
-
-    curr = parent
-    tokens = attr_path.split(".")
-    for group_token in tokens[:-1]:
-        attr_token, index_token = parse(group_token)
-        curr = _get_by_name_index(curr, attr_token, index_token)
-
-    attr_token, index_token = parse(tokens[-1])
-    return curr, attr_token, index_token
-
-
-def getattr_by_path(target: object, attr_path: str) -> Any:
-    """Get a value of nested attribute by a string path.
-
-    :param target: Root object that contains nested attribute
-    :param attr_path: String type value that represents path to an attribute.
-    :return: Object stored at `attr_path`.
-
-    Example:
-        k = gpflow.kernels.Matern52()
-        m = gpflow.models.GPR(..., kernel=kernel)
-        lengthscales = getattr_by_path(m, "kernel.lengthscales")
-    """
-    try:
-        descendant, attr, index = _get_last_attr_spec(target, attr_path)
-        return _get_by_name_index(descendant, attr, index)
-    except (ValueError, TypeError, AttributeError) as error:
-        raise ValueError(f"Cannot get value at path '{attr_path}'") from error
-
-
-def setattr_by_path(target: object, attr_path: str, value: Any):
-    """Set `value` by a given path to a nested attribute.
-
-    :param target: Root object that contains a nested attribute.
-    :param attr_path: String type value that represents path to the attribute.
-    :param value: Value to assign to the attribute.
-
-    Example:
-        k = gpflow.kernels.Matern52()
-        m = gpflow.models.GPR(..., kernel=kernel)
-        setattr_by_path(m, "kernel.lengthscales", tf.constant(1.0, dtype=...))
-    """
-    try:
-        descendant, attr, index = _get_last_attr_spec(target, attr_path)
-        _set_by_name_index(descendant, value, attr, index)
-    except (AttributeError, IndexError, TypeError, ValueError) as error:
-        raise ValueError(f"Cannot assign value at path '{attr_path}'") from error
-
-
 M = TypeVar("M", bound=tf.Module)
 
 
-def deepcopy(input_module: M) -> M:
+def deepcopy(input_module: M, memo: Optional[Dict[int, Any]] = None) -> M:
     """
     Returns a deepcopy of the input tf.Module. To do that first resets the caches stored inside each
     tfp.bijectors.Bijector to allow the deepcopy of the tf.Module.
 
     :param input_module: tf.Module including keras.Model, keras.layers.Layer and gpflow.Module.
+    :param memo: passed through to func:`copy.deepcopy` (see https://docs.python.org/3/library/copy.html).
     :return: Returns a deepcopy of an input object.
     """
-    return copy.deepcopy(reset_cache_bijectors(input_module))
+    return copy.deepcopy(reset_cache_bijectors(input_module), memo)
 
 
 def freeze(input_module: M) -> M:
@@ -382,12 +281,9 @@ def freeze(input_module: M) -> M:
     :param input_module: tf.Module or gpflow.Module.
     :return: Returns a frozen deepcopy of an input object.
     """
-    module_copy = deepcopy(input_module)
-    for name, value in parameter_dict(module_copy).items():
-        tensor = tf.convert_to_tensor(value, dtype=value.dtype)
-        const_value = tf.constant(tensor)
-        attr_path = name.lstrip(".")
-        setattr_by_path(module_copy, attr_path, const_value)
+    objects_to_freeze = _get_leaf_components(input_module)
+    memo_tensors = {id(v): tf.convert_to_tensor(v) for v in objects_to_freeze.values()}
+    module_copy = deepcopy(input_module, memo_tensors)
     return module_copy
 
 
@@ -421,7 +317,13 @@ def traverse_module(
             new_state = traverse_module(subterm, new_acc, update_cb, target_types)
     elif isinstance(m, tf.Module):
         for name, submodule in vars(m).items():
-            if name in tf.Module._TF_MODULE_IGNORED_PROPERTIES:
+            ignored_attributes = m._TF_MODULE_IGNORED_PROPERTIES
+            # NOTE(awav): since tfp version 0.10.0, tfp.bijectors.Bijector instances have
+            # `_parameters` dictionary with "self" references that cause
+            # infinite recursive loop.
+            if isinstance(m, tfp.bijectors.Bijector):
+                ignored_attributes = ignored_attributes.union({"_parameters"})
+            if name in ignored_attributes:
                 continue
             new_acc = (f"{path}.{name}", new_state)
             new_state = traverse_module(submodule, new_acc, update_cb, target_types)

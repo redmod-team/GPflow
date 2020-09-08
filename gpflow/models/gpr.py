@@ -17,11 +17,13 @@ from typing import Optional, Tuple
 import tensorflow as tf
 
 import gpflow
+
 from ..kernels import Kernel
 from ..logdensities import multivariate_normal
 from ..mean_functions import MeanFunction
-from .model import GPModel, InputData, RegressionData, MeanAndVariance
+from .model import GPModel, InputData, MeanAndVariance, RegressionData
 from .training_mixins import InternalDataTrainingLossMixin
+from .util import data_input_to_tensor
 
 
 class GPR(GPModel, InternalDataTrainingLossMixin):
@@ -31,12 +33,20 @@ class GPR(GPModel, InternalDataTrainingLossMixin):
     This is a vanilla implementation of GP regression with a Gaussian
     likelihood.  Multiple columns of Y are treated independently.
 
-    The log likelihood of this model is sometimes referred to as the 'log
-    marginal likelihood', and is given by
+    The log likelihood of this model is given by
 
     .. math::
-       \log p(\mathbf y \,|\, \mathbf f) =
-            \mathcal N(\mathbf{y} \,|\, 0, \mathbf{K} + \sigma_n \mathbf{I})
+       \log p(Y \,|\, \mathbf f) =
+            \mathcal N(Y \,|\, 0, \sigma_n^2 \mathbf{I})
+            
+    To train the model, we maximise the log _marginal_ likelihood
+    w.r.t. the likelihood variance and kernel hyperparameters theta.
+    The marginal likelihood is found by integrating the likelihood
+    over the prior, and has the form
+    
+    .. math::
+       \log p(Y \,|\, \sigma_n, \theta) =
+            \mathcal N(Y \,|\, 0, \mathbf{K} + \sigma_n^2 \mathbf{I})
     """
 
     def __init__(
@@ -49,7 +59,7 @@ class GPR(GPModel, InternalDataTrainingLossMixin):
         likelihood = gpflow.likelihoods.Gaussian(noise_variance)
         _, Y_data = data
         super().__init__(kernel, likelihood, mean_function, num_latent_gps=Y_data.shape[-1])
-        self.data = data
+        self.data = data_input_to_tensor(data)
 
     def maximum_log_likelihood_objective(self) -> tf.Tensor:
         return self.log_marginal_likelihood()
@@ -64,7 +74,7 @@ class GPR(GPModel, InternalDataTrainingLossMixin):
         """
         X, Y = self.data
         K = self.kernel(X)
-        num_data = X.shape[0]
+        num_data = tf.shape(X)[0]
         k_diag = tf.linalg.diag_part(K)
         s_diag = tf.fill([num_data], self.likelihood.variance)
         ks = tf.linalg.set_diag(K, k_diag + s_diag)

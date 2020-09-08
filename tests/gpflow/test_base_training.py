@@ -83,11 +83,9 @@ def test_multiple_assign_updates_correct_values(model, var_update_dict):
     multiple_assign(model, var_update_dict)
     for path, variable in leaf_components(model).items():
         if path in var_update_dict.keys():
-            np.testing.assert_almost_equal(
-                variable.value().numpy(), var_update_dict[path], decimal=7
-            )
+            np.testing.assert_almost_equal(variable.numpy(), var_update_dict[path], decimal=7)
         else:
-            np.testing.assert_equal(variable.value().numpy(), old_value_dict[path].value().numpy())
+            np.testing.assert_equal(variable.numpy(), old_value_dict[path].numpy())
 
 
 @pytest.mark.parametrize("wrong_var_update_dict", model_wrong_path)
@@ -100,17 +98,6 @@ def test_multiple_assign_fails_with_invalid_path(model, wrong_var_update_dict):
 def test_multiple_assign_fails_with_invalid_values(model, wrong_var_update_dict):
     with pytest.raises(ValueError):
         multiple_assign(model, wrong_var_update_dict)
-
-
-def test_make_trainable(model):
-    """
-    Checks whether we `set_trainable()` can make parameters which are *not*
-    trainable trainable again.
-    """
-    set_trainable(model, False)
-    assert len(model.trainable_variables) == 0
-    set_trainable(model, True)
-    assert len(model.trainable_variables) == len(model.parameters)
 
 
 def test_dict_utilities(model):

@@ -38,12 +38,34 @@ def base_conditional(
     :param white: bool
     :return: [N, R]  or [R, N, N]
     """
+    Lm = tf.linalg.cholesky(Kmm)
+    return base_conditional_with_lm(
+        Kmn=Kmn, Lm=Lm, Knn=Knn, f=f, full_cov=full_cov, q_sqrt=q_sqrt, white=white
+    )
+
+
+def base_conditional_with_lm(
+    Kmn: tf.Tensor,
+    Lm: tf.Tensor,
+    Knn: tf.Tensor,
+    f: tf.Tensor,
+    *,
+    full_cov=False,
+    q_sqrt: Optional[tf.Tensor] = None,
+    white=False,
+):
+    r"""
+    Has the same functionality as the `base_conditional` function, except that instead of
+    `Kmm` this function accepts `Lm`, which is the Cholesky decomposition of `Kmm`.
+
+    This allows `Lm` to be precomputed, which can improve performance.
+    """
     # compute kernel stuff
     num_func = tf.shape(f)[-1]  # R
     N = tf.shape(Kmn)[-1]
     M = tf.shape(f)[-2]
 
-    # get the leadings dims in Kmn to the front of the tensor
+    # get the leading dims in Kmn to the front of the tensor
     # if Kmn has rank two, i.e. [M, N], this is the identity op.
     K = tf.rank(Kmn)
     perm = tf.concat(
@@ -58,7 +80,7 @@ def base_conditional(
 
     shape_constraints = [
         (Kmn, [..., "M", "N"]),
-        (Kmm, ["M", "M"]),
+        (Lm, ["M", "M"]),
         (Knn, [..., "N", "N"] if full_cov else [..., "N"]),
         (f, ["M", "R"]),
     ]
@@ -75,7 +97,6 @@ def base_conditional(
     )
 
     leading_dims = tf.shape(Kmn)[:-2]
-    Lm = tf.linalg.cholesky(Kmm)  # [M, M]
 
     # Compute the projection matrix A
     Lm = tf.broadcast_to(Lm, tf.concat([leading_dims, tf.shape(Lm)], 0))  # [..., M, M]
@@ -134,22 +155,19 @@ def base_conditional(
     return fmean, fvar
 
 
-def sample_mvn(mean, cov, cov_structure=None, num_samples=None):
+def sample_mvn(mean, cov, full_cov, num_samples=None):
     """
     Returns a sample from a D-dimensional Multivariate Normal distribution
     :param mean: [..., N, D]
     :param cov: [..., N, D] or [..., N, D, D]
-    :param cov_structure: "diag" or "full"
-    - "diag": cov holds the diagonal elements of the covariance matrix
+    :param full_cov: if `True` return a "full" covariance matrix, otherwise a "diag":
     - "full": cov holds the full covariance matrix (without jitter)
+    - "diag": cov holds the diagonal elements of the covariance matrix
     :return: sample from the MVN of shape [..., (S), N, D], S = num_samples
     """
-    if cov_structure not in ("diag", "full"):
-        raise ValueError("cov_structure must be 'diag' or 'full'")
-
     shape_constraints = [
         (mean, [..., "N", "D"]),
-        (cov, [..., "N", "D"] if cov_structure == "diag" else [..., "N", "D", "D"]),
+        (cov, [..., "N", "D", "D"] if full_cov else [..., "N", "D"]),
     ]
     tf.debugging.assert_shapes(shape_constraints, message="sample_mvn() arguments")
 
@@ -158,13 +176,13 @@ def sample_mvn(mean, cov, cov_structure=None, num_samples=None):
     D = mean_shape[-1]
     leading_dims = mean_shape[:-2]
 
-    if cov_structure == "diag":
+    if not full_cov:
         # mean: [..., N, D] and cov [..., N, D]
         eps_shape = tf.concat([leading_dims, [S], mean_shape[-2:]], 0)
         eps = tf.random.normal(eps_shape, dtype=default_float())  # [..., S, N, D]
         samples = mean[..., None, :, :] + tf.sqrt(cov)[..., None, :, :] * eps  # [..., S, N, D]
 
-    elif cov_structure == "full":
+    else:
         # mean: [..., N, D] and cov [..., N, D, D]
         jittermat = (
             tf.eye(D, batch_shape=mean_shape[:-1], dtype=default_float()) * default_jitter()

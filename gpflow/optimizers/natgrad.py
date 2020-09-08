@@ -132,6 +132,9 @@ class NaturalGradient(tf.optimizers.Optimizer):
     a custom signature (var_list needs to be a list of (q_mu, q_sqrt) tuples,
     where q_mu and q_sqrt are gpflow.Parameter instances, not tf.Variable).
 
+    Note furthermore that the natural gradients are implemented only for the
+    full covariance case (i.e., q_diag=True is NOT supported).
+
     When using in your work, please cite
 
         @inproceedings{salimbeni18,
@@ -192,15 +195,14 @@ class NaturalGradient(tf.optimizers.Optimizer):
         :param parameters: List of tuples (q_mu, q_sqrt, xi_transform)
         """
         q_mus, q_sqrts, xis = zip(*parameters)
-        unconstrained_variables = [
-            p.unconstrained_variable for params in (q_mus, q_sqrts) for p in params
-        ]
+        q_mu_vars = [p.unconstrained_variable for p in q_mus]
+        q_sqrt_vars = [p.unconstrained_variable for p in q_sqrts]
 
         with tf.GradientTape(watch_accessed_variables=False) as tape:
-            tape.watch(unconstrained_variables)
+            tape.watch(q_mu_vars + q_sqrt_vars)
             loss = loss_fn()
 
-        q_mu_grads, q_sqrt_grads = tape.gradient(loss, [q_mus, q_sqrts])
+        q_mu_grads, q_sqrt_grads = tape.gradient(loss, [q_mu_vars, q_sqrt_vars])
         # NOTE that these are the gradients in *unconstrained* space
 
         with tf.name_scope(f"{self._name}/natural_gradient_steps"):
@@ -208,6 +210,11 @@ class NaturalGradient(tf.optimizers.Optimizer):
                 q_mu_grads, q_sqrt_grads, q_mus, q_sqrts, xis
             ):
                 self._natgrad_apply_gradients(q_mu_grad, q_sqrt_grad, q_mu, q_sqrt, xi_transform)
+
+    def _assert_shapes(self, q_mu, q_sqrt):
+        tf.debugging.assert_shapes(
+            [(q_mu, ["M", "L"]), (q_sqrt, ["L", "M", "M"]),]
+        )
 
     def _natgrad_apply_gradients(
         self,
@@ -250,10 +257,13 @@ class NaturalGradient(tf.optimizers.Optimizer):
 
         :param q_mu_grad: gradient of loss w.r.t. q_mu (in unconstrained space)
         :param q_sqrt_grad: gradient of loss w.r.t. q_sqrt (in unconstrained space)
-        :param q_mu: parameter for the mean of q(u)
+        :param q_mu: parameter for the mean of q(u) with shape [M, L]
         :param q_sqrt: parameter for the square root of the covariance of q(u)
+            with shape [L, M, M] (the diagonal parametrization, q_diag=True, is NOT supported)
         :param xi_transform: the ξ transform to use (self.xi_transform if not specified)
         """
+        self._assert_shapes(q_mu, q_sqrt)
+
         if xi_transform is None:
             xi_transform = self.xi_transform
 
@@ -331,7 +341,9 @@ def swap_dimensions(method):
     def wrapper(a_nd, b_dnn, swap=True):
         if swap:
             if a_nd.shape.ndims != 2:  # pragma: no cover
-                raise ValueError("The `a_nd` input must have 2 dimensions.")
+                raise ValueError("The mean parametrization must have 2 dimensions.")
+            if b_dnn.shape.ndims != 3:  # pragma: no cover
+                raise ValueError("The covariance parametrization must have 3 dimensions.")
             a_dn1 = tf.linalg.adjoint(a_nd)[:, :, None]
             A_dn1, B_dnn = method(a_dn1, b_dnn)
             A_nd = tf.linalg.adjoint(A_dn1[:, :, 0])

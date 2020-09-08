@@ -197,8 +197,8 @@ class DataMixedKernel(Data):
 # ------------------------------------------
 
 
-@pytest.mark.parametrize("cov_structure", ["full", "diag"])
-def test_sample_mvn(cov_structure):
+@pytest.mark.parametrize("full_cov", [True, False])
+def test_sample_mvn(full_cov):
     """
     Draws 10,000 samples from a distribution
     with known mean and covariance. The test checks
@@ -207,14 +207,12 @@ def test_sample_mvn(cov_structure):
     """
     N, D = 10000, 2
     means = tf.ones((N, D), dtype=float_type)
-    if cov_structure == "full":
+    if full_cov:
         covs = tf.eye(D, batch_shape=[N], dtype=float_type)
-    elif cov_structure == "diag":
-        covs = tf.ones((N, D), dtype=float_type)
     else:
-        raise (NotImplementedError)
+        covs = tf.ones((N, D), dtype=float_type)
 
-    samples = sample_mvn(means, covs, cov_structure)
+    samples = sample_mvn(means, covs, full_cov)
     samples_mean = np.mean(samples, axis=0)
     samples_cov = np.cov(samples, rowvar=False)
 
@@ -705,3 +703,28 @@ def test_MixedKernelSeparateMof():
     model_2 = SVGP(k2, Gaussian(), inducing_variable=f2, q_mu=data.mu_data, q_sqrt=data.sqrt_data)
 
     check_equality_predictions(Data.data, [model_1, model_2])
+
+
+def test_separate_independent_conditional_with_q_sqrt_none():
+    """
+    In response to bug #1523, this test checks that separate_independent_condtional
+    does not fail when q_sqrt=None.
+    """
+    q_sqrt = None
+    data = DataMixedKernel
+
+    kern_list = [SquaredExponential() for _ in range(data.L)]
+    kernel = gpflow.kernels.SeparateIndependent(kern_list)
+    inducing_variable_list = [InducingPoints(data.X[: data.M, ...]) for _ in range(data.L)]
+    inducing_variable = mf.SeparateIndependentInducingVariables(inducing_variable_list)
+
+    mu_1, var_1 = gpflow.conditionals.conditional(
+        data.X,
+        inducing_variable,
+        kernel,
+        data.mu_data,
+        full_cov=False,
+        full_output_cov=False,
+        q_sqrt=q_sqrt,
+        white=True,
+    )
